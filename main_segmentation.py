@@ -4,7 +4,7 @@ import hydra
 import lightning.pytorch
 import omegaconf
 import torch
-import wandb
+import mlflow
 
 import src.utils
 import src.trainers.knn_eval
@@ -26,15 +26,15 @@ def main(cfg):
             config.model, "input_res"
         ), "input_res is required for config.model=scale-mae"
 
-    run, wandb_logger, config = src.utils.setup_wandb(config)
+    _, mlflow_logger, config = src.utils.setup_mlflow(config)
     src.utils.set_seed(
         config.seed
-    )  # after setup_wandb in case seed is provided by wandb sweep
+    )  # after setup_mlflow in case sweeps override the seed
     datamodule, config = src.utils.get_datamodule(config)
-    callbacks = src.utils.get_callbacks(run.dir)
+    callbacks = src.utils.get_callbacks(config.mlflow.checkpoint_dir)
 
     if config.continual_pretrain_run is not None:
-        pretrain_args = src.utils.get_config_from_wandb_run(config)
+        pretrain_args = src.utils.get_config_from_mlflow_run(config)
         src.utils.assert_model_compatibility(pretrain_args, config, ignore=["model"])
 
     task = src.trainers.segmentation.SegmentationTrainer(
@@ -78,17 +78,17 @@ def main(cfg):
     if config.model.name == "upernet":
         bb = "vit_backbone."
     if config.continual_pretrain_run is not None:
-        task.model = src.utils.load_weights_from_wandb_run(
+        task.model = src.utils.load_weights_from_mlflow_run(
             task.model,
             config,
             prefix=bb,
         )
 
     trainer = lightning.pytorch.Trainer(
-        fast_dev_run=config.wandb.fast_dev_run,
+        fast_dev_run=config.mlflow.fast_dev_run,
         # callbacks=[checkpoint_callback, early_stopping_callback], these will be overridden by callbacks in the task
-        logger=[wandb_logger],
-        default_root_dir=config.wandb.experiment_dir,
+        logger=[mlflow_logger],
+        default_root_dir=config.mlflow.run_dir,
         # min_epochs=config.min_epochs,
         # max_epochs=config.max_epochs,
         min_steps=config.optim.min_steps,
@@ -101,8 +101,12 @@ def main(cfg):
     config.model.trainable_params = sum(
         [p.numel() for p in task.model.parameters() if p.requires_grad]
     )
-    wandb.config["params"] = config.model.params
-    wandb.config["trainable_params"] = config.model.trainable_params
+    mlflow.log_params(
+        {
+            "model_total_params": config.model.params,
+            "model_trainable_params": config.model.trainable_params,
+        }
+    )
 
     if config.verbose:
         print("Trainable parameters:")
@@ -116,10 +120,11 @@ def main(cfg):
         val_dataloaders=datamodule.val_dataloader(),
     )
 
+    test_metrics = trainer.test(model=task, dataloaders=datamodule.val_dataloader())
     if config.verbose:
-        print(
-            f"Eval performance: {trainer.test(model=task, dataloaders=datamodule.val_dataloader())}"
-        )
+        print(f"Eval performance: {test_metrics}")
+    if len(test_metrics):
+        mlflow.log_metrics({f"val_{k}": v for k, v in test_metrics[0].items()})
 
     if config.knn.knn_eval:
         knn = src.trainers.KNNEval(
@@ -134,9 +139,11 @@ def main(cfg):
 
         if config.verbose:
             print(f"{knn_stats=}")
-        wandb.log(knn_stats)
+        mlflow.log_metrics(knn_stats)
 
-    wandb.config["final_configs"] = src.utils.update_configs(config)
+    src.utils.log_checkpoints_to_mlflow(callbacks[0])
+    mlflow.log_dict(src.utils.update_configs(config), "final_configs.yml")
+    mlflow.end_run()
 
 
 if __name__ == "__main__":

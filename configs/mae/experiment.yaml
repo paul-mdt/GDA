@@ -1,14 +1,12 @@
 task: mae
 seed: 0
 verbose: True
-wandb:
-  mode: online
+mlflow:
+  tracking_uri: logs/mlruns
+  experiment: mae
+  run_name: null
   fast_dev_run: False
-  entity: lscheibenreif
-  project: low-rank-da-mae
   log_model: True
-  experiment_dir: logs/mae
-  cache_dir: cache/
 data:
   datamodule: EuroSATSARDataModule # BENGEDataModule # TreeSatAIDataModule # OSCDDataModule # DeepGlobeLandCoverDataModule # EuroSATSARDataModule # UCMercedDataModule # EuroSATSARDataModule # TreeSatAIDataModule # FireRiskDataModule # BENGEDataModule # RESISC45DataModule #TreeSatAIDataModule #EuroSATDataModule #FireRiskDataModule # RESISC45DataModule #BENGEDataModule #EuroSATDataModule
   modality: s1 #aerial #s1

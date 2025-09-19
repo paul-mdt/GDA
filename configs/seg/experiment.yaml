@@ -2,14 +2,12 @@ task: segmentation
 continual_pretrain_run: pnhnusx6 # 6vivgdyb # pnhnusx6 # kc7u3y5s #6vivgdyb # kc7u3y5s # pnhnusx6
 seed: 2
 verbose: True
-wandb:
-  mode: online
+mlflow:
+  tracking_uri: logs/mlruns
+  experiment: segmentation
+  run_name: null
   fast_dev_run: False
-  entity: lscheibenreif
-  project: low-rank-da-seg
   log_model: True
-  experiment_dir: logs/seg
-  cache_dir: cache/
 data:
   datamodule: BENGEDataModule #EuroSATDataModule
   modality: s1
