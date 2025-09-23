@@ -11,6 +11,7 @@ from .oscd import OSCDDataModule
 from .levir import LEVIRDataModule
 from .caltech256 import Caltech256DataModule
 from .paris_cropped import ParisCroppedDataModule
+from .paris_224 import ParisSegmentationDataModule
 
 __all__ = [
     "UCMercedDataModule",
@@ -26,4 +27,5 @@ __all__ = [
     "LEVIRDataModule",
     "Caltech256DataModule",
     "ParisCroppedDataModule",
+    "ParisSegmentationDataModule",
 ]
