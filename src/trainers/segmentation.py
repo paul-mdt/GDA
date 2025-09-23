@@ -297,16 +297,73 @@ class SegmentationTrainer(torchgeo.trainers.SemanticSegmentationTask):
 
         return imgs
 
+    def _generate_default_palette(self, num_colors: int) -> list[int]:
+        num_colors = max(1, num_colors)
+        if num_colors == 1:
+            return [0, 0, 0]
+
+        palette: list[int] = []
+        for idx in range(num_colors):
+            value = int(round(255 * idx / (num_colors - 1)))
+            palette.extend([value, value, value])
+        return palette
+
+    def _get_mask_palette(self) -> list[int]:
+        num_classes = int(self.hparams["num_classes"])
+
+        palette_config = None
+        try:
+            palette_config = self.hparams["mask_palette"]
+        except (KeyError, TypeError):
+            palette_config = getattr(self.hparams, "mask_palette", None)
+
+        user_palette: list[int] = []
+        if palette_config is not None:
+            if isinstance(palette_config, np.ndarray):
+                palette_values = palette_config.reshape(-1).tolist()
+            else:
+                palette_values = []
+                for value in palette_config:
+                    if isinstance(value, (list, tuple, np.ndarray)):
+                        palette_values.extend(np.asarray(value).reshape(-1).tolist())
+                    else:
+                        palette_values.append(value)
+            user_palette = [
+                int(max(0, min(255, round(float(v))))) for v in palette_values
+            ]
+            if len(user_palette) % 3 != 0:
+                user_palette.extend([0] * (3 - len(user_palette) % 3))
+
+        user_color_count = len(user_palette) // 3
+        color_count = min(max(num_classes, user_color_count), 256)
+        color_count = max(color_count, 1)
+        palette = self._generate_default_palette(color_count)
+
+        if user_palette:
+            limit = min(user_color_count, color_count)
+            palette[: limit * 3] = user_palette[: limit * 3]
+
+        if len(palette) < 256 * 3:
+            palette.extend([0] * (256 * 3 - len(palette)))
+        else:
+            palette = palette[: 256 * 3]
+
+        return palette
+
     def PIL_masks_from_batch(self, x, n=4):
         """return list of PIL images from tensor input images"""
         imgs = []
+        palette = self._get_mask_palette()
         for img in x[:n]:
             # img = np.moveaxis(img.detach().cpu().numpy(), 0, -1)
-            assert len(img.shape) == 2 or img.shape[-1] == 1, f"{img.shape=}"
+            img = img.detach().cpu().numpy()
+            img = np.squeeze(img)
+            assert img.ndim == 2, f"{img.shape=}"
             assert img.min() >= 0
             assert img.max() <= 255
-            img = img.detach().cpu().numpy()
-            img = img.astype(np.uint8) * (255 // self.hparams["num_classes"])
-            imgs.append(PIL.Image.fromarray(img, mode="P"))
+            img = img.astype(np.uint8)
+            pil_img = PIL.Image.fromarray(img, mode="P")
+            pil_img.putpalette(palette)
+            imgs.append(pil_img)
 
         return imgs
