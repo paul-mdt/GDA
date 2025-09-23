@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 from collections import defaultdict
 
+
 import kornia
 import lightning.pytorch.callbacks
 import numpy as np
@@ -102,6 +103,7 @@ class LocalMLFlowLogger(MLFlowLogger):
         super().__init__(*args, **kwargs)
         self._image_counters = defaultdict(int)
 
+
     @property
     def run_dir(self) -> str:
         """Return the local artifact directory for the active MLflow run."""
@@ -119,11 +121,13 @@ class LocalMLFlowLogger(MLFlowLogger):
         if step is None:
             step = self._image_counters[key]
             self._image_counters[key] += 1
+
         for idx, image in enumerate(images):
             if not isinstance(image, Image.Image):
                 raise TypeError("Expected PIL.Image.Image instances for logging")
 
             filename = f"{key}-{step}-{idx}.png"
+
 
             with tempfile.TemporaryDirectory() as tmpdir:
                 path = os.path.join(tmpdir, filename)
