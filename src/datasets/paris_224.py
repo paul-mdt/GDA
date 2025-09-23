@@ -34,10 +34,13 @@ class ParisBuildingSegmentation(Dataset):
         transforms: Optional[
             Callable[[dict[str, torch.Tensor]], dict[str, torch.Tensor]]
         ] = None,
+        augmentations: Optional[Callable[[np.ndarray, np.ndarray], dict[str, np.ndarray]]]
+        = None,
         files: Optional[Iterable[Path]] = None,
     ) -> None:
         self.root = Path(root)
         self.transforms = transforms
+        self.augmentations = augmentations
 
         if files is not None:
             self.files: List[Path] = sorted(Path(p) for p in files)
@@ -97,10 +100,19 @@ class ParisBuildingSegmentation(Dataset):
         with rasterio.open(image_path) as src:
             image = src.read().astype(np.float32)
         with rasterio.open(mask_path) as src:
-            mask = src.read(1)
+            mask = src.read(1).astype(np.int64)
 
-        image_tensor = torch.from_numpy(image)
-        mask_tensor = torch.from_numpy(mask.astype(np.int64)).unsqueeze(0)
+        image = np.moveaxis(image, 0, -1)
+
+        if self.augmentations is not None:
+            augmented = self.augmentations(image=image, mask=mask)
+            image = augmented["image"]
+            mask = augmented["mask"]
+
+        image = np.moveaxis(image, -1, 0)
+
+        image_tensor = torch.from_numpy(np.ascontiguousarray(image))
+        mask_tensor = torch.from_numpy(np.ascontiguousarray(mask)).unsqueeze(0)
 
         sample = {"image": image_tensor, "mask": mask_tensor}
 

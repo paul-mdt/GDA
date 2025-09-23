@@ -5,11 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-import kornia.augmentation as K
-from kornia.constants import Resample
+import albumentations as A
+import cv2
 import lightning.pytorch as pl
 import torch
-from torch.utils.data import DataLoader, Dataset, random_split
+from torch.utils.data import DataLoader, Dataset
 
 from ..datasets.paris_224 import ParisBuildingSegmentation
 
@@ -39,11 +39,40 @@ class ParisSegmentationDataModule(pl.LightningDataModule):
         self.val_split = val_split
         self.test_split = test_split
         self.seed = seed
-        self.train_augmentations = K.AugmentationSequential(
-            K.RandomHorizontalFlip(p=0.5),
-            K.RandomVerticalFlip(p=0.5),
-            K.RandomRotation(p=0.5, degrees=30, resample=Resample.NEAREST),
-            data_keys=["input", "mask"],
+        self.train_augmentations = A.Compose(
+            [
+                A.RandomResizedCrop(
+                    height=224,
+                    width=224,
+                    scale=(0.75, 1.0),
+                    ratio=(0.8, 1.25),
+                    p=0.5,
+                ),
+                A.RandomRotate90(p=0.5),
+                A.HorizontalFlip(p=0.5),
+                A.VerticalFlip(p=0.5),
+                A.ShiftScaleRotate(
+                    shift_limit=0.1,
+                    scale_limit=0.15,
+                    rotate_limit=30,
+                    border_mode=cv2.BORDER_REFLECT_101,
+                    p=0.75,
+                ),
+                A.OneOf(
+                    [
+                        A.RandomBrightnessContrast(p=1.0),
+                        A.CLAHE(clip_limit=2.0, tile_grid_size=(8, 8), p=1.0),
+                    ],
+                    p=0.3,
+                ),
+                A.OneOf(
+                    [
+                        A.GaussianBlur(blur_limit=(3, 5), p=1.0),
+                        A.GaussNoise(var_limit=(5.0, 25.0), p=1.0),
+                    ],
+                    p=0.2,
+                ),
+            ]
         )
 
     def prepare_data(self) -> None:  # noqa: D401 - no-op hook
@@ -60,7 +89,10 @@ class ParisSegmentationDataModule(pl.LightningDataModule):
 
         if splits_available:
             self.train_dataset = ParisBuildingSegmentation(
-                self.root, split="train", transforms=self.transforms
+                self.root,
+                split="train",
+                transforms=self.transforms,
+                augmentations=self.train_augmentations,
             )
             self.val_dataset = ParisBuildingSegmentation(
                 self.root, split="val", transforms=self.transforms
@@ -74,27 +106,39 @@ class ParisSegmentationDataModule(pl.LightningDataModule):
             )
             lengths = self._split_lengths(len(full_dataset))
             generator = torch.Generator().manual_seed(self.seed)
-            datasets = random_split(full_dataset, lengths, generator=generator)
-            self.train_dataset, self.val_dataset, self.test_dataset = datasets
-            for subset in datasets:
-                subset.classes = full_dataset.classes
+            permutation = torch.randperm(len(full_dataset), generator=generator)
+
+            train_end = lengths[0]
+            val_end = train_end + lengths[1]
+
+            train_files = [full_dataset.files[i] for i in permutation[:train_end]]
+            val_files = [full_dataset.files[i] for i in permutation[train_end:val_end]]
+            test_files = [full_dataset.files[i] for i in permutation[val_end:]]
+
+            self.train_dataset = ParisBuildingSegmentation(
+                self.root,
+                split=None,
+                transforms=self.transforms,
+                augmentations=self.train_augmentations,
+                files=train_files,
+            )
+            self.val_dataset = ParisBuildingSegmentation(
+                self.root,
+                split=None,
+                transforms=self.transforms,
+                files=val_files,
+            )
+            self.test_dataset = ParisBuildingSegmentation(
+                self.root,
+                split=None,
+                transforms=self.transforms,
+                files=test_files,
+            )
+
+            for dataset in (self.train_dataset, self.val_dataset, self.test_dataset):
+                dataset.classes = full_dataset.classes
 
         self.drop_last = stage == "fit"
-
-    def on_after_batch_transfer(self, batch, batch_idx: int):
-        if (
-            hasattr(self, "trainer")
-            and self.trainer is not None
-            and hasattr(self.trainer, "training")
-            and self.trainer.training
-        ):
-            images = batch["image"]
-            masks = batch["mask"].float().unsqueeze(1)
-            images, masks = self.train_augmentations(images, masks)
-            batch["image"] = images
-            batch["mask"] = masks.squeeze(1).long()
-
-        return batch
 
     def _split_lengths(self, dataset_size: int) -> list[int]:
         test = int(dataset_size * self.test_split)
