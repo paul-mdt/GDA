@@ -1,19 +1,25 @@
 """Collection of utility methods for model training and evaluation."""
 
-import copy
 import os
 import random
+import shutil
+import tempfile
+from pathlib import Path
 from typing import Tuple
+from urllib.parse import urlparse
 
-import glob
+from collections import defaultdict
+
 import kornia
 import lightning.pytorch.callbacks
-import lightning.pytorch.loggers
 import numpy as np
 import torch
 import torchgeo.transforms
-import wandb
 import yaml
+import mlflow
+from lightning.pytorch.loggers import MLFlowLogger
+from mlflow.tracking import MlflowClient
+from PIL import Image
 
 import src.datamodules
 
@@ -39,16 +45,14 @@ def update_configs(config: dict) -> dict:
     return updated_configs
 
 
-def set_resources(num_threads: int, wand_cache_dir: str = None):
+def set_resources(num_threads: int):
     """Sets environment variables to control resource usage.
 
     The environment variables control the number of used threads
-    for different vector op libraries and GDAL. The cache dir controls
-    where wandb cache is stored locally.
+    for different vector op libraries and GDAL.
 
     Args.
         num_threads: the max number of threads.
-        wand_cache_dir: path to the desired cache dir
 
     """
 
@@ -59,9 +63,6 @@ def set_resources(num_threads: int, wand_cache_dir: str = None):
     os.environ["VECLIB_MAXIMUM_THREADS"] = num_threads
     os.environ["NUMEXPR_NUM_THREADS"] = num_threads
     os.environ["GDAL_NUM_THREADS"] = num_threads
-
-    if wand_cache_dir:
-        os.environ["WANDB_CACHE_DIR"] = wand_cache_dir
 
 
 def set_seed(seed: int):
@@ -94,55 +95,128 @@ class Dotdict:
             self.__dict__[k] = v
 
 
-def setup_wandb(
+class LocalMLFlowLogger(MLFlowLogger):
+    """Lightning MLflow logger with helpers for local artifact management."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._image_counters = defaultdict(int)
+
+    @property
+    def run_dir(self) -> str:
+        """Return the local artifact directory for the active MLflow run."""
+
+        run_info = self.experiment.get_run(self.run_id)
+        return _artifact_uri_to_path(run_info.info.artifact_uri)
+
+    def log_image(self, key: str, images, step: int = None, caption=None) -> None:
+        """Log PIL images as MLflow artifacts."""
+
+        if not isinstance(images, (list, tuple)):
+            images = [images]
+
+        artifact_subdir = os.path.join("images", key)
+        if step is None:
+            step = self._image_counters[key]
+            self._image_counters[key] += 1
+        for idx, image in enumerate(images):
+            if not isinstance(image, Image.Image):
+                raise TypeError("Expected PIL.Image.Image instances for logging")
+
+            filename = f"{key}-{step}-{idx}.png"
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                path = os.path.join(tmpdir, filename)
+                image.save(path)
+                self.experiment.log_artifact(
+                    self.run_id,
+                    path,
+                    artifact_path=artifact_subdir,
+                )
+
+
+def _artifact_uri_to_path(artifact_uri: str) -> str:
+    """Convert an MLflow artifact URI into a filesystem path."""
+
+    parsed = urlparse(artifact_uri)
+    if parsed.scheme not in ("", "file"):
+        raise ValueError(f"Unsupported artifact URI scheme: {parsed.scheme}")
+
+    if parsed.scheme == "file":
+        path = parsed.path
+        if not path:
+            path = artifact_uri.split("file:", 1)[1]
+    else:
+        path = artifact_uri
+
+    if parsed.netloc:
+        path = os.path.join(os.sep + parsed.netloc, path.lstrip("/"))
+
+    return os.path.abspath(path)
+
+
+def _resolve_tracking_uri(raw_uri: str) -> Tuple[str, str]:
+    """Resolve a tracking URI to MLflow's expected format and ensure the directory exists."""
+
+    parsed = urlparse(raw_uri)
+    if parsed.scheme not in ("", "file"):
+        raise ValueError("Only local file-based MLflow tracking URIs are supported")
+
+    if parsed.scheme == "":
+        path = os.path.abspath(parsed.path)
+        uri = Path(path).as_uri()
+    else:
+        path = parsed.path or raw_uri.split("file:", 1)[1]
+        path = os.path.abspath(path)
+        uri = Path(path).as_uri()
+
+    os.makedirs(path, exist_ok=True)
+    return uri, path
+
+
+def setup_mlflow(
     config: Dotdict,
-) -> Tuple[wandb.run, lightning.pytorch.loggers.WandbLogger, Dotdict]:
-    """Sets up wandb logging for a training run.
+) -> Tuple[mlflow.ActiveRun, LocalMLFlowLogger, Dotdict]:
+    """Configure MLflow tracking for a training or evaluation run."""
 
-    This will run wandb.init with arguments based on the config and store
-    the used config on disk.
+    tracking_uri, tracking_path = _resolve_tracking_uri(config.mlflow.tracking_uri)
+    mlflow.set_tracking_uri(tracking_uri)
+    experiment = mlflow.set_experiment(config.mlflow.experiment)
 
-    Args:
-        config: config of the training run.
+    run_kwargs = {}
+    if getattr(config.mlflow, "run_name", None):
+        run_kwargs["run_name"] = config.mlflow.run_name
 
-    Returns:
-        A tuple consisting of the wandb run, the lightning logger, and the updated config.
-
-    Side-effects:
-        Stores the config used to initialize the wandb run to the run directory.
-    """
-
-    os.environ["WANDB_CACHE_DIR"] = config.wandb.cache_dir
-
-    if not os.path.exists(config.wandb.experiment_dir):
-        os.makedirs(config.wandb.experiment_dir)
-
-    run = wandb.init(
-        mode=config.wandb.mode,
-        entity=config.wandb.entity,
-        project=config.wandb.project,
-        dir=config.wandb.experiment_dir,
-    )
-    wandb_logger = lightning.pytorch.loggers.WandbLogger(
-        log_model=config.wandb.log_model,
-        config=config,
-        experiment=run,
-        dir=run.dir,
+    run = mlflow.start_run(**run_kwargs)
+    mlflow_logger = LocalMLFlowLogger(
+        experiment_name=experiment.name,
+        tracking_uri=tracking_uri,
+        run_id=run.info.run_id,
+        log_model=config.mlflow.log_model,
     )
 
-    config.__dict__.update(
-        wandb.config
-    )  # when using a wandb sweep, the wandb agent might update some params
+    run_dir = mlflow_logger.run_dir
+    os.makedirs(run_dir, exist_ok=True)
 
-    # upload up-to-date config to wandb
-    wandb.config["setup_config"] = update_configs(config)
+    checkpoint_dir = os.path.join(run_dir, "checkpoints")
+    os.makedirs(checkpoint_dir, exist_ok=True)
+
+    config.mlflow.tracking_uri = tracking_uri
+    config.mlflow.tracking_path = tracking_path
+    config.mlflow.experiment_id = experiment.experiment_id
+    config.mlflow.run_id = run.info.run_id
+    config.mlflow.run_dir = run_dir
+    config.mlflow.checkpoint_dir = checkpoint_dir
+
+    resolved_config = update_configs(config)
+    mlflow.log_dict(resolved_config, "updated_setup_configs.yml")
 
     if config.verbose:
-        print(run.dir)
-    with open(os.path.join(run.dir, "updated_setup_configs.yml"), "w") as outfile:
-        yaml.dump(wandb.config["setup_config"], outfile, default_flow_style=False)
+        print(run_dir)
+    with open(os.path.join(run_dir, "updated_setup_configs.yml"), "w") as outfile:
+        yaml.dump(resolved_config, outfile, default_flow_style=False)
 
-    return run, wandb_logger, config
+    return run, mlflow_logger, config
 
 
 def get_datamodule(
@@ -306,43 +380,72 @@ def get_callbacks(
     return checkpoint_callback, early_stopping_callback, lr_monitor
 
 
-def get_ckpt_path_from_wandb_run(
+def _get_mlflow_client(tracking_uri: str = None) -> MlflowClient:
+    """Return an MLflow client for the configured tracking URI."""
+
+    if tracking_uri:
+        return MlflowClient(tracking_uri=tracking_uri)
+    return MlflowClient(tracking_uri=mlflow.get_tracking_uri())
+
+
+def _get_artifact_cache_dir(run_id: str) -> str:
+    """Return (and create) a local cache directory for downloaded MLflow artifacts."""
+
+    cache_dir = os.path.join("logs", "mlflow_artifacts", run_id)
+    os.makedirs(cache_dir, exist_ok=True)
+    return cache_dir
+
+
+def log_checkpoints_to_mlflow(
+    checkpoint_callback: lightning.pytorch.callbacks.ModelCheckpoint,
+    artifact_path: str = "checkpoints",
+) -> None:
+    """Upload best and last checkpoints saved by a callback to MLflow."""
+
+    if checkpoint_callback is None:
+        return
+
+    checkpoints = {}
+    best_path = getattr(checkpoint_callback, "best_model_path", None)
+    if best_path and os.path.isfile(best_path):
+        checkpoints["best.ckpt"] = best_path
+
+    last_path = getattr(checkpoint_callback, "last_model_path", None)
+    if last_path and os.path.isfile(last_path):
+        checkpoints["last.ckpt"] = last_path
+
+    for filename, path in checkpoints.items():
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target_path = os.path.join(tmpdir, filename)
+            shutil.copy2(path, target_path)
+            mlflow.log_artifact(target_path, artifact_path=artifact_path)
+
+
+def get_ckpt_path_from_mlflow_run(
     config: Dotdict, run_id_key: str = "continual_pretrain_run", state: str = "best"
-):
-    """Returns the path to a model checkpoint associated with a wandb run.
+) -> str:
+    """Return the local path to a checkpoint artifact stored in MLflow."""
 
-    Args:
-        config: config of the wandb/training run.
-        run_id_key: type of the wandb run.
-        state: best or latest checkpoint.
+    run_id = getattr(config, run_id_key)
+    if run_id is None:
+        raise ValueError(f"Config does not define {run_id_key}")
 
-    Returns:
-        path to the checkpoint
-    """
-
-    run_path = glob.glob(
-        os.path.join("logs/mae", "wandb", f"*{getattr(config, run_id_key)}")
-    )
-    if not len(run_path):
-        # try other wandb-project
-        run_path = glob.glob(
-            os.path.join("logs/lin_eval", "wandb", f"*{getattr(config, run_id_key)}")
-        )
-    if not len(run_path):
-        run_path = glob.glob(
-            os.path.join("logs/seg", "wandb", f"*{getattr(config, run_id_key)}")
-        )
-    assert len(run_path) == 1, f"{run_path=}"
-    run_path = run_path[0]
-
-    if state == "best":
-        best_ckpt = glob.glob(os.path.join(run_path, "files", "epoch=*.ckpt"))[0]
-    elif state == "last":
-        best_ckpt = os.path.join(run_path, "files", "last.ckpt")
-    else:
+    artifact_file = "best.ckpt" if state == "best" else "last.ckpt"
+    if state not in {"best", "last"}:
         raise ValueError(f"{state} not in [best, last]")
 
-    return best_ckpt
+    client = _get_mlflow_client(
+        getattr(getattr(config, "mlflow", Dotdict({})), "tracking_uri", None)
+    )
+    cache_dir = _get_artifact_cache_dir(run_id)
+    local_path = client.download_artifacts(
+        run_id,
+        os.path.join("checkpoints", artifact_file),
+        cache_dir,
+    )
+    if not os.path.isfile(local_path):
+        raise FileNotFoundError(f"Checkpoint {artifact_file} not found for run {run_id}")
+    return local_path
 
 
 def assert_model_compatibility(
@@ -393,34 +496,39 @@ def assert_model_compatibility(
     return True
 
 
-def get_config_from_wandb_run(
+def get_config_from_mlflow_run(
     config: Dotdict,
     run_id_key: str = "continual_pretrain_run",
     return_ckpt_path: bool = False,
 ) -> Dotdict:
-    """Get the config associated with a finished wandb run.
+    """Get the configuration dictionary stored with a finished MLflow run."""
 
-    Args:
-        config: the config for the run of interest.
-        run_id_key: the type of the run.
-        return_ckpt_path: if the path to the checkout should also be returned.
+    run_id = getattr(config, run_id_key)
+    if run_id is None:
+        raise ValueError(f"Config does not define {run_id_key}")
 
-    Returns:
-        the config, or a tuple of config and checkpoint path.
-    """
+    client = _get_mlflow_client(
+        getattr(getattr(config, "mlflow", Dotdict({})), "tracking_uri", None)
+    )
+    cache_dir = _get_artifact_cache_dir(run_id)
+    config_path = client.download_artifacts(
+        run_id,
+        "updated_setup_configs.yml",
+        cache_dir,
+    )
 
-    ckpt_path = get_ckpt_path_from_wandb_run(config, run_id_key=run_id_key)
-    ckpt = torch.load(ckpt_path)
-
-    args = copy.deepcopy(ckpt["hyper_parameters"])
-    del ckpt
+    with open(config_path, "r") as fh:
+        args = yaml.safe_load(fh)
 
     if return_ckpt_path:
+        ckpt_path = get_ckpt_path_from_mlflow_run(
+            config, run_id_key=run_id_key
+        )
         return args, ckpt_path
     return args
 
 
-def load_weights_from_wandb_run(
+def load_weights_from_mlflow_run(
     model: torch.nn.Module,
     config: Dotdict,
     prefix: str = None,
@@ -428,7 +536,7 @@ def load_weights_from_wandb_run(
     return_ckpt: bool = False,
     which_state: str = "best",
 ):
-    """Load weights from a finished wandb run into a model object.
+    """Load weights from a finished MLflow run into a model object.
 
     Args:
         model: the torch model.
@@ -442,7 +550,7 @@ def load_weights_from_wandb_run(
         the model initialzed with weights from ´config´, or a tuple with the checkpoint.
     """
 
-    best_ckpt = get_ckpt_path_from_wandb_run(
+    best_ckpt = get_ckpt_path_from_mlflow_run(
         config,
         run_id_key=run_id_key,
         state=which_state,

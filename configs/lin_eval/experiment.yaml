@@ -3,14 +3,12 @@ seed: 0
 continual_pretrain_run: byte40e5 # 6jxqsgfq # i6gbfbcj # thzyp0uh # xkk2ansu # tal70boa # 97urvd7y # a8mxo4mo # 8mqljd2q # t7rdwmsu # xu0vcgov # pnhnusx6 # 0os9icg2 # fwojfns2 # y29do21k # 94gc7ywm # null # i6gbfbcj # gxckrnje # 6jxqsgfq # gxckrnje #i6gbfbcj # 2kgdczn0 # afkqnf7c # kkhibo9q # fwojfns2 #b37wamj8 # xu0vcgov # null # 4sj9at5l # pyq77n5m #kkhibo9q # yn249xdf # 4sj9at5l # v0ty65bk # bkowqopx # afkqnf7c # 6ul0af5z # v4xfokkf # i6gbfbcj # b2nazlvi # 56p7cq5v # gxckrnje # 8mqljd2q # xu0vcgov # y29do21k # hjsdhpgj # gxckrnje # gaqth03a # i6gbfbcj # wx9n2r31 # 94gc7ywm #56p7cq5v # tal70boa # thzyp0uh #xkk2ansu # 97urvd7y # gaqth03a # t7rdwmsu # a8mxo4mo # k9wx89q5 # 6vivgdyb # gaqth03a # t7rdwmsu #6vivgdyb # fwojfns2 # i6gbfbcj #97urvd7y #zmihgaey # a8mxo4mo #97urvd7y #zmihgaey # a8mxo4mo # 0os9icg2 # k9wx89q5 # 0os9icg2 # a8mxo4mo ##6jxqsgfq #k9wx89q5 #xu0vcgov #6jxqsgfq # aptg8zwr #vfcnsnd3 # vfcnsnd3 #pnhnusx6 #xxaagint #x7eggmj3 #kc7u3y5s # xxaagint #x7eggmj3 #pnhnusx6 #x7eggmj3 #su1rpl64
 resume: null # 1rida8wc
 verbose: True
-wandb:
-  mode: online
+mlflow:
+  tracking_uri: logs/mlruns
+  experiment: lin_eval
+  run_name: null
   fast_dev_run: False
-  entity: lscheibenreif
-  project: low-rank-da-lin_eval
   log_model: True
-  experiment_dir: logs/lin_eval
-  cache_dir: cache/
 data:
   datamodule: Caltech256DataModule   # EuroSATSARDataModule # RESISC45DataModule # BENGEDataModule # TreeSatAIDataModule # TreeSatAIDataModule # TreeSatAIDataModule #RESISC45DataModule # FireRiskDataModule #EuroSATDataModule # TreeSatAIDataModule  #FireRiskDataModule  BENGEDataModule #EuroSATDataModule RESISC45DataModule 
   modality: null # s1 # s1 # aerial #s1 #aerial # s1 #aerial # s1

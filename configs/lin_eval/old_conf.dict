@@ -35,12 +35,12 @@
         }
     args = utils.Dotdict(
         {
-            "wandb_mode": "online",
-            "fast_dev_run": False,
-            "entity": "lscheibenreif",
-            "project": "low-rank-da-lin-eval",
-            "log_model": False,
-            "experiment_dir": os.path.join(os.getcwd(), "logs/lin_eval"),
-            "cache_dir": os.path.join(os.getcwd(), "cache"),
+            "mlflow": {
+                "tracking_uri": os.path.join(os.getcwd(), "logs/mlruns"),
+                "experiment": "lin_eval",
+                "run_name": None,
+                "fast_dev_run": False,
+                "log_model": False,
+            }
         }
     )

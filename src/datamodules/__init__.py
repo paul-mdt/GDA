@@ -10,6 +10,7 @@ from .deepglobe import DeepGlobeLandCoverDataModule
 from .oscd import OSCDDataModule
 from .levir import LEVIRDataModule
 from .caltech256 import Caltech256DataModule
+from .paris_cropped import ParisCroppedDataModule
 
 __all__ = [
     "UCMercedDataModule",
@@ -24,4 +25,5 @@ __all__ = [
     "OSCDDataModule",
     "LEVIRDataModule",
     "Caltech256DataModule",
+    "ParisCroppedDataModule",
 ]

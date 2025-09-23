@@ -3,7 +3,7 @@
 import functools
 
 import torch
-import wandb
+import mlflow
 import hydra
 import omegaconf
 import src.trainers.knn_eval
@@ -19,12 +19,12 @@ def main(cfg):
         omegaconf.OmegaConf.to_container(cfg, resolve=True, throw_on_missing=True)
     )
 
-    _, _, config = src.utils.setup_wandb(config)
+    _, _, config = src.utils.setup_mlflow(config)
     src.utils.set_seed(config.seed)
     datamodule, config = src.utils.get_datamodule(config)
 
     if config.continual_pretrain_run is not None:
-        pretrain_args = src.utils.get_config_from_wandb_run(config)
+        pretrain_args = src.utils.get_config_from_mlflow_run(config)
         src.utils.assert_model_compatibility(pretrain_args, config)
 
     # create feature extraction model (which is the same as linear eval feature extraction model)
@@ -58,7 +58,7 @@ def main(cfg):
     model = task.model
 
     if config.continual_pretrain_run is not None:
-        model = src.utils.load_weights_from_wandb_run(model, config)
+        model = src.utils.load_weights_from_mlflow_run(model, config)
 
     if config.model.name == "scale_mae":
         assert config.model.type == "mae", f"see "
@@ -80,7 +80,7 @@ def main(cfg):
 
     if config.verbose:
         print(f"{knn_stats=}")
-    wandb.log(knn_stats)
+    mlflow.log_metrics(knn_stats)
 
     if config.test:
         datamodule.setup("test")
@@ -88,9 +88,10 @@ def main(cfg):
 
     if config.verbose:
         print(f"{test_stats=}")
-    wandb.log(test_stats)
+    mlflow.log_metrics(test_stats)
 
-    wandb.config["final_configs"] = src.utils.update_configs(config)
+    mlflow.log_dict(src.utils.update_configs(config), "final_configs.yml")
+    mlflow.end_run()
 
 
 if __name__ == "__main__":
