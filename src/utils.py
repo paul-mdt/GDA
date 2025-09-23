@@ -1,6 +1,5 @@
 """Collection of utility methods for model training and evaluation."""
 
-import copy
 import os
 import random
 import shutil
@@ -8,6 +7,9 @@ import tempfile
 from pathlib import Path
 from typing import Tuple
 from urllib.parse import urlparse
+
+from collections import defaultdict
+
 
 import kornia
 import lightning.pytorch.callbacks
@@ -99,6 +101,8 @@ class LocalMLFlowLogger(MLFlowLogger):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self._image_counters = defaultdict(int)
+
 
     @property
     def run_dir(self) -> str:
@@ -114,13 +118,16 @@ class LocalMLFlowLogger(MLFlowLogger):
             images = [images]
 
         artifact_subdir = os.path.join("images", key)
+        if step is None:
+            step = self._image_counters[key]
+            self._image_counters[key] += 1
+
         for idx, image in enumerate(images):
             if not isinstance(image, Image.Image):
                 raise TypeError("Expected PIL.Image.Image instances for logging")
 
-            filename = f"{key}-{idx}.png"
-            if step is not None:
-                filename = f"{key}-{step}-{idx}.png"
+            filename = f"{key}-{step}-{idx}.png"
+
 
             with tempfile.TemporaryDirectory() as tmpdir:
                 path = os.path.join(tmpdir, filename)

@@ -32,6 +32,7 @@ from .eurosat_sar import EuroSATSAR
 from .deepglobe import DeepGlobeLandCover
 from .oscd import OSCD
 from .caltech256 import Caltech256Dataset as Caltech256
+from .paris_cropped import ParisCropped
 
 __all__ = [
     "UCMerced",
@@ -45,6 +46,7 @@ __all__ = [
     "DeepGlobeLandCover",
     "OSCD",
     "Caltech256",
+    "ParisCropped",
     # Base classes
     "GeoDataset",
     "IntersectionDataset",
