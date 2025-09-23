@@ -346,6 +346,13 @@ def get_datamodule(
 
     datamodule.setup("fit")
     config.data.num_classes = len(datamodule.train_dataset.classes)
+    classes_attr = getattr(datamodule.train_dataset, "classes", None)
+    if classes_attr is not None:
+        config.data.class_names = list(classes_attr)
+    else:
+        config.data.class_names = [
+            str(index) for index in range(config.data.num_classes)
+        ]
     config.data.in_chans = datamodule.train_dataset[0]["image"].shape[0]
 
     return datamodule, config
