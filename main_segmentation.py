@@ -70,6 +70,7 @@ def main(cfg):
         adapter_trainable=config.model.adapter_trainable,
         only_bias_trainable=config.model.only_bias_trainable,
         only_scaler_trainable=config.model.only_scaler_trainable,
+        class_names=config.data.class_names,
     )
 
     accelerator = "gpu" if torch.cuda.is_available() else "cpu"

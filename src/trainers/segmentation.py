@@ -1,12 +1,12 @@
 """Trainer for image segmentation."""
 
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 import torch
 import numpy as np
 import PIL
 import matplotlib.pyplot as plt
-from torchmetrics import MetricCollection
+from torchmetrics import Metric, MetricCollection
 from torchmetrics.classification import (
     MulticlassAccuracy,
     MulticlassJaccardIndex,
@@ -61,8 +61,12 @@ class SegmentationTrainer(torchgeo.trainers.SemanticSegmentationTask):
         callbacks=None,
         only_scaler_trainable=False,
         only_bias_trainable=False,
+        class_names: Optional[Sequence[str]] = None,
     ) -> None:
         super().__init__()
+        self._class_names = (
+            list(class_names) if class_names is not None else None
+        )
 
     def configure_callbacks(self):
         return self.hparams["callbacks"]  # self.callbacks
@@ -91,19 +95,25 @@ class SegmentationTrainer(torchgeo.trainers.SemanticSegmentationTask):
         """Initialize the performance metrics."""
         num_classes: int = self.hparams["num_classes"]
         ignore_index: Optional[int] = self.hparams["ignore_index"]
-        metrics = MetricCollection(
-            [
-                MulticlassAccuracy(
-                    num_classes=num_classes,
-                    ignore_index=ignore_index,
-                    multidim_average="global",
-                    average="micro",
-                ),
-                MulticlassJaccardIndex(
-                    num_classes=num_classes, ignore_index=ignore_index, average="micro"
-                ),
-            ]
+        per_class_metrics = self._build_per_class_iou_metrics(
+            num_classes=num_classes,
+            ignore_index=ignore_index,
         )
+        metric_dict: dict[str, Metric] = {
+            "MulticlassAccuracy": MulticlassAccuracy(
+                num_classes=num_classes,
+                ignore_index=ignore_index,
+                multidim_average="global",
+                average="micro",
+            ),
+            "MulticlassJaccardIndex": MulticlassJaccardIndex(
+                num_classes=num_classes,
+                ignore_index=ignore_index,
+                average="micro",
+            ),
+            **per_class_metrics,
+        }
+        metrics = MetricCollection(metric_dict)
         self.train_metrics = metrics.clone(prefix="train_")
         self.val_metrics = metrics.clone(prefix="val_")
         self.test_metrics = metrics.clone(prefix="test_")
@@ -297,16 +307,153 @@ class SegmentationTrainer(torchgeo.trainers.SemanticSegmentationTask):
 
         return imgs
 
+    def _generate_default_palette(self, num_colors: int) -> list[int]:
+        num_colors = max(1, num_colors)
+        if num_colors == 1:
+            return [0, 0, 0]
+
+        palette: list[int] = []
+        for idx in range(num_colors):
+            value = int(round(255 * idx / (num_colors - 1)))
+            palette.extend([value, value, value])
+        return palette
+
+    def _get_mask_palette(self) -> list[int]:
+        num_classes = int(self.hparams["num_classes"])
+
+        palette_config = None
+        try:
+            palette_config = self.hparams["mask_palette"]
+        except (KeyError, TypeError):
+            palette_config = getattr(self.hparams, "mask_palette", None)
+
+        user_palette: list[int] = []
+        if palette_config is not None:
+            if isinstance(palette_config, np.ndarray):
+                palette_values = palette_config.reshape(-1).tolist()
+            else:
+                palette_values = []
+                for value in palette_config:
+                    if isinstance(value, (list, tuple, np.ndarray)):
+                        palette_values.extend(np.asarray(value).reshape(-1).tolist())
+                    else:
+                        palette_values.append(value)
+            user_palette = [
+                int(max(0, min(255, round(float(v))))) for v in palette_values
+            ]
+            if len(user_palette) % 3 != 0:
+                user_palette.extend([0] * (3 - len(user_palette) % 3))
+
+        user_color_count = len(user_palette) // 3
+        color_count = min(max(num_classes, user_color_count), 256)
+        color_count = max(color_count, 1)
+        palette = self._generate_default_palette(color_count)
+
+        if user_palette:
+            limit = min(user_color_count, color_count)
+            palette[: limit * 3] = user_palette[: limit * 3]
+
+        if len(palette) < 256 * 3:
+            palette.extend([0] * (256 * 3 - len(palette)))
+        else:
+            palette = palette[: 256 * 3]
+
+        return palette
+
     def PIL_masks_from_batch(self, x, n=4):
         """return list of PIL images from tensor input images"""
         imgs = []
+        palette = self._get_mask_palette()
         for img in x[:n]:
             # img = np.moveaxis(img.detach().cpu().numpy(), 0, -1)
-            assert len(img.shape) == 2 or img.shape[-1] == 1, f"{img.shape=}"
+            img = img.detach().cpu().numpy()
+            img = np.squeeze(img)
+            assert img.ndim == 2, f"{img.shape=}"
             assert img.min() >= 0
             assert img.max() <= 255
-            img = img.detach().cpu().numpy()
-            img = img.astype(np.uint8) * (255 // self.hparams["num_classes"])
-            imgs.append(PIL.Image.fromarray(img, mode="P"))
+            img = img.astype(np.uint8)
+            pil_img = PIL.Image.fromarray(img, mode="P")
+            pil_img.putpalette(palette)
+            imgs.append(pil_img)
 
         return imgs
+
+    def _build_per_class_iou_metrics(
+        self,
+        num_classes: int,
+        ignore_index: Optional[int],
+    ) -> dict[str, Metric]:
+        class_names = self._resolve_class_names(num_classes)
+        metrics: dict[str, Metric] = {}
+        used_names: set[str] = set()
+        for class_index, class_name in enumerate(class_names):
+            if ignore_index is not None and class_index == ignore_index:
+                continue
+            metric_name = self._sanitize_class_metric_name(
+                class_name, class_index, used_names
+            )
+            metrics[metric_name] = _ClasswiseJaccardIndex(
+                num_classes=num_classes,
+                ignore_index=ignore_index,
+                class_index=class_index,
+            )
+        return metrics
+
+    def _resolve_class_names(self, num_classes: int) -> list[str]:
+        if self._class_names is not None:
+            class_names: list[str] = [str(name) for name in self._class_names]
+        else:
+            class_names = []
+            datamodule = getattr(self.trainer, "datamodule", None)
+            dataset = getattr(datamodule, "train_dataset", None) if datamodule else None
+            if dataset is not None and hasattr(dataset, "classes"):
+                class_names = [str(name) for name in dataset.classes]
+        if not class_names:
+            class_names = [str(index) for index in range(num_classes)]
+        if len(class_names) < num_classes:
+            class_names.extend(
+                str(index) for index in range(len(class_names), num_classes)
+            )
+        elif len(class_names) > num_classes:
+            class_names = class_names[:num_classes]
+        return class_names
+
+    def _sanitize_class_metric_name(
+        self, class_name: str, class_index: int, used_names: set[str]
+    ) -> str:
+        base = "".join(
+            ch.lower() if ch.isalnum() else "_"
+            for ch in class_name.strip()
+        ).strip("_")
+        if not base:
+            base = f"class_{class_index}"
+        candidate = f"{base}_iou"
+        suffix = 1
+        while candidate in used_names:
+            candidate = f"{base}_{suffix}_iou"
+            suffix += 1
+        used_names.add(candidate)
+        return candidate
+
+
+class _ClasswiseJaccardIndex(MulticlassJaccardIndex):
+    """Compute IoU for a single class index using multiclass Jaccard."""
+
+    def __init__(
+        self,
+        num_classes: int,
+        ignore_index: Optional[int],
+        class_index: int,
+    ) -> None:
+        super().__init__(
+            num_classes=num_classes,
+            ignore_index=ignore_index,
+            average=None,
+        )
+        self.class_index = class_index
+
+    def compute(self):  # type: ignore[override]
+        values = super().compute()
+        if values.ndim == 0:
+            return values
+        return values[self.class_index]

@@ -88,6 +88,7 @@ def test_run(row, idx, chosen_ckpt):
             adapter_trainable=config.model.adapter_trainable,
             only_bias_trainable=False,
             only_scaler_trainable=False,
+            class_names=config.data.class_names,
         )
     else:
         task = src.trainers.linear_eval.LinearEvaluationTask(
