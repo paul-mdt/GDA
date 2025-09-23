@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
+import kornia.augmentation as K
+from kornia.constants import Resample
 import lightning.pytorch as pl
 import torch
 from torch.utils.data import DataLoader, Dataset, random_split
@@ -37,6 +39,12 @@ class ParisSegmentationDataModule(pl.LightningDataModule):
         self.val_split = val_split
         self.test_split = test_split
         self.seed = seed
+        self.train_augmentations = K.AugmentationSequential(
+            K.RandomHorizontalFlip(p=0.5),
+            K.RandomVerticalFlip(p=0.5),
+            K.RandomRotation(p=0.5, degrees=30, resample=Resample.NEAREST),
+            data_keys=["input", "mask"],
+        )
 
     def prepare_data(self) -> None:  # noqa: D401 - no-op hook
         """Placeholder to comply with LightningDataModule API."""
@@ -72,6 +80,21 @@ class ParisSegmentationDataModule(pl.LightningDataModule):
                 subset.classes = full_dataset.classes
 
         self.drop_last = stage == "fit"
+
+    def on_after_batch_transfer(self, batch, batch_idx: int):
+        if (
+            hasattr(self, "trainer")
+            and self.trainer is not None
+            and hasattr(self.trainer, "training")
+            and self.trainer.training
+        ):
+            images = batch["image"]
+            masks = batch["mask"].float().unsqueeze(1)
+            images, masks = self.train_augmentations(images, masks)
+            batch["image"] = images
+            batch["mask"] = masks.squeeze(1).long()
+
+        return batch
 
     def _split_lengths(self, dataset_size: int) -> list[int]:
         test = int(dataset_size * self.test_split)
