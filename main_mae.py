@@ -11,13 +11,13 @@ import hydra
 import lightning.pytorch
 from omegaconf import OmegaConf
 import torch
-import wandb
+import mlflow
 
 import src.trainers
 import src.utils
 
 src.utils.set_resources(
-    num_threads=4, wand_cache_dir="./cache/"
+    num_threads=4
 )
 
 
@@ -34,12 +34,12 @@ def main(cfg):
             config.model, "input_res"
         ), "input_res is required for config.model=scale-mae"
 
-    run, wandb_logger, config = src.utils.setup_wandb(config)
+    _, mlflow_logger, config = src.utils.setup_mlflow(config)
     src.utils.set_seed(
         config.seed
-    )  # after setup_wandb in case seed is provided by wandb sweep
+    )  # after setup_mlflow in case sweeps override the seed
     datamodule, config = src.utils.get_datamodule(config)
-    callbacks = src.utils.get_callbacks(run.dir)
+    callbacks = src.utils.get_callbacks(config.mlflow.checkpoint_dir)
 
     assert config.model.loss_on_all_patches, f"{config.model.loss_on_all_patches=}"
     task = src.trainers.MaskedAutoencoding(
@@ -78,11 +78,11 @@ def main(cfg):
     accelerator = "gpu" if torch.cuda.is_available() else "cpu"
 
     trainer = lightning.pytorch.Trainer(
-        fast_dev_run=config.wandb.fast_dev_run,
+        fast_dev_run=config.mlflow.fast_dev_run,
         # callbacks=[checkpoint_callback, early_stopping_callback], these will be overridden by callbacks in the task
-        logger=[wandb_logger],
+        logger=[mlflow_logger],
         # default_root_dir=args.experiment_dir,
-        default_root_dir=run.dir,
+        default_root_dir=config.mlflow.run_dir,
         # min_epochs=config.min_epochs,
         # max_epochs=config.max_epochs,
         min_steps=config.optim.min_steps,
@@ -96,8 +96,12 @@ def main(cfg):
     config.model.trainable_params = sum(
         [p.numel() for p in task.model.parameters() if p.requires_grad]
     )
-    wandb.config["params"] = config.model.params
-    wandb.config["trainable_params"] = config.model.trainable_params
+    mlflow.log_params(
+        {
+            "model_total_params": config.model.params,
+            "model_trainable_params": config.model.trainable_params,
+        }
+    )
 
     if config.verbose:
         print("Trainable parameters:")
@@ -126,9 +130,11 @@ def main(cfg):
 
         if config.verbose:
             print(f"{knn_stats=}")
-        wandb.log(knn_stats)
+        mlflow.log_metrics(knn_stats)
 
-    wandb.config["final_configs"] = src.utils.update_configs(config)
+    src.utils.log_checkpoints_to_mlflow(callbacks[0])
+    mlflow.log_dict(src.utils.update_configs(config), "final_configs.yml")
+    mlflow.end_run()
 
 
 if __name__ == "__main__":

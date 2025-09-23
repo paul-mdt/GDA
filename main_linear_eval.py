@@ -4,7 +4,7 @@ import hydra
 import lightning.pytorch
 import omegaconf
 import torch
-import wandb
+import mlflow
 
 import src.utils
 import src.trainers.linear_eval
@@ -23,19 +23,19 @@ def main(cfg):
     if config.optim.use_lr_scheduler:
         assert config.val_every_n_epoch == 1
 
-    run, wandb_logger, config = src.utils.setup_wandb(config)
+    _, mlflow_logger, config = src.utils.setup_mlflow(config)
     src.utils.set_seed(config.seed)
     datamodule, config = src.utils.get_datamodule(config)
-    callbacks = src.utils.get_callbacks(run.dir)
+    callbacks = src.utils.get_callbacks(config.mlflow.checkpoint_dir)
 
     if config.continual_pretrain_run is not None:
         print(f"Reading config of pre-train run.. {config.continual_pretrain_run=}")
-        pretrain_args = src.utils.get_config_from_wandb_run(config)
+        pretrain_args = src.utils.get_config_from_mlflow_run(config)
         src.utils.assert_model_compatibility(pretrain_args, config)
 
     if config.resume is not None:
         print(f"Reading config of earlier run.. {config.resume=}")
-        pretrain_args, ckpt_path = src.utils.get_config_from_wandb_run(
+        pretrain_args, ckpt_path = src.utils.get_config_from_mlflow_run(
             config, run_id_key="resume", return_ckpt_path=True
         )
         src.utils.assert_model_compatibility(
@@ -77,16 +77,16 @@ def main(cfg):
 
     if config.continual_pretrain_run is not None:
         print(f"Loading weights from pre-train run...")
-        task.model = src.utils.load_weights_from_wandb_run(task.model, config)
+        task.model = src.utils.load_weights_from_mlflow_run(task.model, config)
 
     accelerator = "gpu" if torch.cuda.is_available() else "cpu"
 
     if hasattr(config.optim, "max_steps") and config.optim.max_steps is not None:
         trainer = lightning.pytorch.Trainer(
-            fast_dev_run=config.wandb.fast_dev_run,
+            fast_dev_run=config.mlflow.fast_dev_run,
             # callbacks=[checkpoint_callback, early_stopping_callback], these will be overridden by callbacks in the task
-            logger=[wandb_logger],
-            default_root_dir=config.wandb.experiment_dir,
+            logger=[mlflow_logger],
+            default_root_dir=config.mlflow.run_dir,
             min_steps=config.optim.min_steps,
             max_steps=config.optim.max_steps,
             accelerator=accelerator,
@@ -95,10 +95,10 @@ def main(cfg):
         )
     elif hasattr(config.optim, "max_epochs") and config.optim.max_epochs is not None:
         trainer = lightning.pytorch.Trainer(
-            fast_dev_run=config.wandb.fast_dev_run,
+            fast_dev_run=config.mlflow.fast_dev_run,
             # callbacks=[checkpoint_callback, early_stopping_callback], these will be overridden by callbacks in the task
-            logger=[wandb_logger],
-            default_root_dir=config.wandb.experiment_dir,
+            logger=[mlflow_logger],
+            default_root_dir=config.mlflow.run_dir,
             min_epochs=config.optim.min_epochs,
             max_epochs=config.optim.max_epochs,
             accelerator=accelerator,
@@ -110,8 +110,12 @@ def main(cfg):
     config.model.trainable_params = sum(
         [p.numel() for p in task.model.parameters() if p.requires_grad]
     )
-    wandb.config["params"] = config.model.params
-    wandb.config["trainable_params"] = config.model.trainable_params
+    mlflow.log_params(
+        {
+            "model_total_params": config.model.params,
+            "model_trainable_params": config.model.trainable_params,
+        }
+    )
 
     print("Trainable parameters:")
     for n, p in task.model.named_parameters():
@@ -133,9 +137,10 @@ def main(cfg):
             val_dataloaders=datamodule.val_dataloader(),
         )
 
-    print(
-        f"Eval performance: {trainer.test(model=task, dataloaders=datamodule.val_dataloader())}"
-    )
+    test_metrics = trainer.test(model=task, dataloaders=datamodule.val_dataloader())
+    print(f"Eval performance: {test_metrics}")
+    if len(test_metrics):
+        mlflow.log_metrics({f"val_{k}": v for k, v in test_metrics[0].items()})
 
     if config.knn.knn_eval:
         knn = src.trainers.knn_eval.KNNEval(
@@ -148,7 +153,7 @@ def main(cfg):
         knn_stats = knn.fit_eval()
 
         print(f"{knn_stats=}")
-        wandb.log(knn_stats)
+        mlflow.log_metrics(knn_stats)
 
     updated_configs = {}
     for k, v in config.__dict__.items():
@@ -156,7 +161,9 @@ def main(cfg):
             updated_configs[k] = v.__dict__
         else:
             updated_configs[k] = v
-    wandb.config["final_configs"] = updated_configs
+    src.utils.log_checkpoints_to_mlflow(callbacks[0])
+    mlflow.log_dict(updated_configs, "final_configs.yml")
+    mlflow.end_run()
 
 
 if __name__ == "__main__":

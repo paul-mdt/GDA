@@ -1,13 +1,12 @@
 """Main script to evaluate the performance of trained models."""
 
 import os
+from pathlib import Path
 
-import glob
 import lightning.pytorch
 import pandas as pd
 import torch
 import tqdm
-import yaml
 
 import src.utils
 import src.trainers.linear_eval
@@ -15,49 +14,28 @@ import src.trainers.segmentation
 import src.trainers.knn_eval
 
 
+DEFAULT_MLFLOW_TRACKING_URI = os.environ.get(
+    "MLFLOW_TRACKING_URI", Path("logs/mlruns").resolve().as_uri()
+)
+
+
 def test_run(row, idx, chosen_ckpt):
     run_id = row.run_id
 
-    if "seg" in row.dataset:
-        config_path = glob.glob(
-            os.path.join(
-                "logs/seg/wandb/",
-                f"*{run_id}",
-            )
-        )
-    else:
-        config_path = glob.glob(
-            os.path.join(
-                "logs/lin_eval/wandb/",
-                f"*{run_id}",
-            )
-        )
-
-    assert len(config_path) == 1, f"{config_path=}"
-    config_file = os.path.join(config_path[0], "files", "updated_setup_configs.yaml")
-
-    if not os.path.isfile(config_file):
-        old_config = True
-        config_file = os.path.join(
-            config_path[0],
-            "files",
-            "config.yaml",
-        )
-    else:
-        old_config = False
-
-    with open(config_file, "r") as f:
-        try:
-            config = yaml.safe_load(f)
-        except yaml.YAMLError as e:
-            print(e)
-
-    config = src.utils.Dotdict(config)
-    if old_config:
-        if hasattr(config, "final_configs"):
-            config = config.final_configs.value
-        else:
-            config = config.setup_config.value
+    lookup_config = src.utils.Dotdict(
+        {
+            "training_run_id": run_id,
+            "mlflow": src.utils.Dotdict({"tracking_uri": DEFAULT_MLFLOW_TRACKING_URI}),
+        }
+    )
+    raw_config = src.utils.get_config_from_mlflow_run(
+        lookup_config, run_id_key="training_run_id"
+    )
+    config = src.utils.Dotdict(raw_config)
+    if not hasattr(config, "mlflow"):
+        config.mlflow = src.utils.Dotdict({"tracking_uri": DEFAULT_MLFLOW_TRACKING_URI})
+    elif not hasattr(config.mlflow, "tracking_uri"):
+        config.mlflow.tracking_uri = DEFAULT_MLFLOW_TRACKING_URI
     config.training_run_id = run_id
     config.num_workers = 6
 
@@ -65,7 +43,7 @@ def test_run(row, idx, chosen_ckpt):
         src.utils.assert_run_validity(row, config, idx)
     except AttributeError as e:
         print(e)
-        print(config_file)
+        print(f"Invalid configuration for run {run_id}")
         print(config)
 
     src.utils.set_seed(config.seed)
@@ -142,7 +120,7 @@ def test_run(row, idx, chosen_ckpt):
             norm_trainable=config.model.norm_trainable,
         )
 
-    task.model = src.utils.load_weights_from_wandb_run(
+    task.model = src.utils.load_weights_from_mlflow_run(
         task.model,
         config,
         run_id_key="training_run_id",

@@ -4,14 +4,12 @@ seed: 0
 continual_pretrain_run: x7eggmj3 #ppm8b8zn #xxaagint # su1rpl64
 test: True # apply model to test set
 verbose: True
-wandb:
-  mode: online
+mlflow:
+  tracking_uri: logs/mlruns
+  experiment: knn_eval
+  run_name: null
   fast_dev_run: False
-  entity: lscheibenreif
-  project: low-rank-da-knn_eval
   log_model: False
-  experiment_dir: logs/knn_eval
-  cache_dir: cache/
 data:
   datamodule: EuroSATDataModule
   bands: [B04, B03, B02] #[B01, B02, B03, B04, B05, B06, B07, B08, B08A, B09, B11, B12] # [B04,B03,B02]
