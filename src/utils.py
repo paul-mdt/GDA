@@ -2,6 +2,7 @@
 
 import os
 import random
+import ast
 import shutil
 import tempfile
 from pathlib import Path
@@ -18,6 +19,7 @@ import torch
 import torchgeo.transforms
 import yaml
 import mlflow
+from mlflow.exceptions import MlflowException
 from lightning.pytorch.loggers import MLFlowLogger
 from mlflow.tracking import MlflowClient
 from PIL import Image
@@ -453,48 +455,169 @@ def get_ckpt_path_from_mlflow_run(
 
 
 def assert_model_compatibility(
-    pretrain_config: Dotdict, downstream_config: Dotdict, ignore: list = []
+    pretrain_config: Dotdict, downstream_config: Dotdict, ignore: list | None = None
 ):
-    """Performs some checks to ensure pre-training run and downstream tasks are compatible.
+    """Performs some checks to ensure pre-training run and downstream tasks are compatible."""
 
-    Args:
-        pretrain_config: config of the pretraining run.
-        downstream_config: config of the downstream task.
-        ignore: list of checks to be skipped.
+    if ignore is None:
+        ignore = []
 
-    Returns:
-        True if all checks passed.
+    def _maybe_get(mapping, key):
+        if isinstance(mapping, dict):
+            return mapping.get(key)
+        if hasattr(mapping, key):
+            return getattr(mapping, key)
+        return None
 
-    Raises:
-        AssertionError if any check fails.
-    """
+    def _resolve_value(*paths):
+        for path in paths:
+            current = pretrain_config
+            for key in path:
+                current = _maybe_get(current, key)
+                if current is None:
+                    break
+            else:
+                return current
+        return None
 
-    if not "model" in ignore:
+    def _coerce_to_reference(value, reference):
+        if value is None:
+            return None
+        if isinstance(reference, bool):
+            if isinstance(value, str):
+                return value.lower() in {"true", "1", "yes"}
+            return bool(value)
+        if isinstance(reference, int) and not isinstance(reference, bool):
+            if isinstance(value, str):
+                try:
+                    return int(value)
+                except ValueError:
+                    return value
+            if isinstance(value, float):
+                return int(value)
+        if isinstance(reference, float):
+            if isinstance(value, str):
+                try:
+                    return float(value)
+                except ValueError:
+                    return value
+            if isinstance(value, int):
+                return float(value)
+        if isinstance(reference, (list, tuple)) and isinstance(value, str):
+            try:
+                return ast.literal_eval(value)
+            except (ValueError, SyntaxError):
+                return value
+        return value
+
+    def _check(key, actual, *paths, required: bool = False):
+        value = _resolve_value(*paths)
+        if value is None:
+            if required:
+                raise AssertionError(
+                    f"Missing `{key}` in stored pretraining configuration"
+                )
+            return
+        coerced = _coerce_to_reference(value, actual)
         assert (
-            pretrain_config["model"] == downstream_config.model.name
-        ), f"{pretrain_config['model']=}, {downstream_config.model.name=}"
-    assert pretrain_config["in_channels"] == downstream_config.data.in_chans
-    if not "embed_dim" in ignore:
-        assert pretrain_config["embed_dim"] == downstream_config.model.embed_dim
-    assert pretrain_config["input_size"] == downstream_config.data.img_size
-    assert pretrain_config["patch_size"] == downstream_config.model.patch_size
-    assert pretrain_config["adapter"] == downstream_config.model.adapter
-    assert (
-        pretrain_config["adapter_type"] == downstream_config.model.adapter_type
-    ), f"{pretrain_config['adapter_type']=}, {downstream_config.model.adapter_type=}"
-    assert pretrain_config["adapter_shared"] == downstream_config.model.adapter_shared
-    assert pretrain_config["adapter_scale"] == downstream_config.model.adapter_scale
-    assert (
-        pretrain_config["adapter_hidden_dim"]
-        == downstream_config.model.adapter_hidden_dim
-    ), f"{pretrain_config['adapter_hidden_dim']=}, {downstream_config.model.adapter_hidden_dim=}"
-    assert (
-        pretrain_config["patch_embed_adapter"]
-        == downstream_config.model.patch_embed_adapter
-    ), f"{pretrain_config['patch_embed_adapter']=}, {downstream_config.model.patch_embed_adapter=}"
-    assert (
-        pretrain_config["patch_embed_adapter_scale"]
-        == downstream_config.model.patch_embed_adapter_scale
+            coerced == actual
+        ), f"Mismatch for {key}: pretraining={coerced}, downstream={actual}"
+
+    if "model" not in ignore:
+        model_name = _resolve_value(
+            ("model", "name"),
+            ("model",),
+            ("params", "model"),
+            ("model_name",),
+        )
+        if isinstance(model_name, dict):
+            model_name = _maybe_get(model_name, "name")
+        if model_name is None:
+            raise AssertionError("Missing `model` in stored pretraining configuration")
+        assert (
+            model_name == downstream_config.model.name
+        ), f"{model_name=}, {downstream_config.model.name=}"
+
+    _check(
+        "in_channels",
+        downstream_config.data.in_chans,
+        ("in_channels",),
+        ("data", "in_chans"),
+        ("params", "in_channels"),
+        required=True,
+    )
+    if "embed_dim" not in ignore:
+        _check(
+            "embed_dim",
+            downstream_config.model.embed_dim,
+            ("embed_dim",),
+            ("model", "embed_dim"),
+            ("params", "embed_dim"),
+        )
+    _check(
+        "input_size",
+        downstream_config.data.img_size,
+        ("input_size",),
+        ("data", "img_size"),
+        ("params", "input_size"),
+    )
+    _check(
+        "patch_size",
+        downstream_config.model.patch_size,
+        ("patch_size",),
+        ("model", "patch_size"),
+        ("params", "patch_size"),
+        required=True,
+    )
+    _check(
+        "adapter",
+        downstream_config.model.adapter,
+        ("adapter",),
+        ("model", "adapter"),
+        ("params", "adapter"),
+        required=True,
+    )
+    _check(
+        "adapter_type",
+        downstream_config.model.adapter_type,
+        ("adapter_type",),
+        ("model", "adapter_type"),
+        ("params", "adapter_type"),
+    )
+    _check(
+        "adapter_shared",
+        downstream_config.model.adapter_shared,
+        ("adapter_shared",),
+        ("model", "adapter_shared"),
+        ("params", "adapter_shared"),
+    )
+    _check(
+        "adapter_scale",
+        downstream_config.model.adapter_scale,
+        ("adapter_scale",),
+        ("model", "adapter_scale"),
+        ("params", "adapter_scale"),
+    )
+    _check(
+        "adapter_hidden_dim",
+        downstream_config.model.adapter_hidden_dim,
+        ("adapter_hidden_dim",),
+        ("model", "adapter_hidden_dim"),
+        ("params", "adapter_hidden_dim"),
+    )
+    _check(
+        "patch_embed_adapter",
+        downstream_config.model.patch_embed_adapter,
+        ("patch_embed_adapter",),
+        ("model", "patch_embed_adapter"),
+        ("params", "patch_embed_adapter"),
+    )
+    _check(
+        "patch_embed_adapter_scale",
+        downstream_config.model.patch_embed_adapter_scale,
+        ("patch_embed_adapter_scale",),
+        ("model", "patch_embed_adapter_scale"),
+        ("params", "patch_embed_adapter_scale"),
     )
 
     return True
@@ -515,14 +638,52 @@ def get_config_from_mlflow_run(
         getattr(getattr(config, "mlflow", Dotdict({})), "tracking_uri", None)
     )
     cache_dir = _get_artifact_cache_dir(run_id)
-    config_path = client.download_artifacts(
-        run_id,
-        "updated_setup_configs.yml",
-        cache_dir,
-    )
+    config_path = None
+    for candidate in ("final_configs.yml", "updated_setup_configs.yml"):
+        try:
+            downloaded = client.download_artifacts(run_id, candidate, cache_dir)
+        except MlflowException:
+            continue
+        if os.path.isfile(downloaded):
+            config_path = downloaded
+            break
+
+    if config_path is None:
+        raise FileNotFoundError(
+            f"Could not locate configuration artifacts for run {run_id}"
+        )
 
     with open(config_path, "r") as fh:
-        args = yaml.safe_load(fh)
+        args = yaml.safe_load(fh) or {}
+
+    try:
+        params_dir = client.download_artifacts(run_id, "params", cache_dir)
+    except MlflowException:
+        params_dir = None
+    else:
+        params_path = Path(params_dir)
+        if params_path.is_dir():
+            loaded_params = {}
+            for param_file in params_path.iterdir():
+                if not param_file.is_file():
+                    continue
+                raw_value = param_file.read_text().strip()
+                if raw_value == "":
+                    continue
+                loaded_params[param_file.name] = _parse_mlflow_param(raw_value)
+            if loaded_params:
+                existing_params = (
+                    args["params"]
+                    if isinstance(args.get("params"), dict)
+                    else {}
+                )
+                merged_params = {**loaded_params, **existing_params}
+                args["params"] = merged_params
+                for key, value in loaded_params.items():
+                    args.setdefault(key, value)
+                if isinstance(existing_params, dict):
+                    for key, value in existing_params.items():
+                        args.setdefault(key, value)
 
     if return_ckpt_path:
         ckpt_path = get_ckpt_path_from_mlflow_run(
@@ -590,6 +751,23 @@ def load_weights_from_mlflow_run(
         return model, ckpt
 
     return model
+
+
+def _parse_mlflow_param(raw_value: str):
+    raw_value = raw_value.strip()
+    if not raw_value:
+        return raw_value
+    try:
+        return ast.literal_eval(raw_value)
+    except (ValueError, SyntaxError):
+        lowered = raw_value.lower()
+        if lowered == "true":
+            return True
+        if lowered == "false":
+            return False
+        if lowered == "none":
+            return None
+        return raw_value
 
 
 def assert_run_validity(row: dict, config: Dotdict, idx: int) -> bool:

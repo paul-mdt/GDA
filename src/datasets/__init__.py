@@ -33,6 +33,7 @@ from .deepglobe import DeepGlobeLandCover
 from .oscd import OSCD
 from .caltech256 import Caltech256Dataset as Caltech256
 from .paris_cropped import ParisCropped
+from .paris_224 import ParisBuildingSegmentation, ParisSegmentation
 
 __all__ = [
     "UCMerced",
@@ -47,6 +48,8 @@ __all__ = [
     "OSCD",
     "Caltech256",
     "ParisCropped",
+    "ParisBuildingSegmentation",
+    "ParisSegmentation",
     # Base classes
     "GeoDataset",
     "IntersectionDataset",
