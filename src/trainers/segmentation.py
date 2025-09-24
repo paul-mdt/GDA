@@ -34,7 +34,7 @@ class SegmentationTrainer(torchgeo.trainers.SemanticSegmentationTask):
         patch_size=16,
         in_channels: int = 3,
         num_classes: int = 1000,
-        num_filters: int = 3,
+        num_filters: int = 64,
         loss: str = "ce",
         pretrained=True,
         input_res=10,
@@ -62,16 +62,61 @@ class SegmentationTrainer(torchgeo.trainers.SemanticSegmentationTask):
         only_scaler_trainable=False,
         only_bias_trainable=False,
         class_names: Optional[Sequence[str]] = None,
+        unet_bilinear: bool = True,
+        unet_encoder_name: Optional[str] = None,
+        unet_encoder_weights: Optional[str] = "imagenet",
+        unet_encoder_depth: int = 5,
+        unet_decoder_channels: Optional[Sequence[int]] = None,
+        unet_decoder_use_batchnorm: bool = True,
     ) -> None:
         super().__init__()
         self._class_names = (
             list(class_names) if class_names is not None else None
         )
+        if hasattr(self, "hparams"):
+            extra_hparams = {
+                "unet_bilinear": unet_bilinear,
+                "unet_encoder_name": unet_encoder_name,
+                "unet_encoder_weights": unet_encoder_weights,
+                "unet_encoder_depth": unet_encoder_depth,
+                "unet_decoder_channels": unet_decoder_channels,
+                "unet_decoder_use_batchnorm": unet_decoder_use_batchnorm,
+            }
+            for key, value in extra_hparams.items():
+                try:
+                    self.hparams[key] = value
+                except (AttributeError, TypeError):
+                    setattr(self.hparams, key, value)
 
     def configure_callbacks(self):
         return self.hparams["callbacks"]  # self.callbacks
 
     def configure_models(self):
+        if self.hparams["segmentation_model"] == "unet":
+            base_channels = self.hparams.get("num_filters", 64)
+            encoder_name = self.hparams.get("unet_encoder_name")
+            if not encoder_name:
+                encoder_name = None
+            decoder_channels = self.hparams.get("unet_decoder_channels")
+            if decoder_channels is not None:
+                decoder_channels = [int(ch) for ch in decoder_channels]
+            self.model = src.models_segmentation.UNet(
+                in_channels=self.hparams["in_channels"],
+                num_classes=self.hparams["num_classes"],
+                base_channels=base_channels,
+                bilinear=self.hparams.get("unet_bilinear", True),
+                encoder_name=encoder_name,
+                encoder_weights=self.hparams.get("unet_encoder_weights", "imagenet"),
+                encoder_depth=self.hparams.get("unet_encoder_depth", 5),
+                decoder_channels=decoder_channels,
+                decoder_use_batchnorm=self.hparams.get(
+                    "unet_decoder_use_batchnorm", True
+                ),
+            )
+            if self.hparams.get("freeze_backbone", False):
+                self.model.freeze_encoder()
+            return
+
         backbone = src.models.get_model(**self.hparams)
 
         # add segmentation head
@@ -88,7 +133,8 @@ class SegmentationTrainer(torchgeo.trainers.SemanticSegmentationTask):
             )
         else:
             raise NotImplementedError(
-                f"`model` must be in [fcn, upernet], not {self.hparams['model']}"
+                "`segmentation_model` must be one of ['fcn', 'upernet', 'unet'], "
+                f"got {self.hparams['segmentation_model']}"
             )
 
     def configure_metrics(self) -> None:

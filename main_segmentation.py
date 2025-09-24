@@ -37,6 +37,23 @@ def main(cfg):
         pretrain_args = src.utils.get_config_from_mlflow_run(config)
         src.utils.assert_model_compatibility(pretrain_args, config, ignore=["model"])
 
+    unet_kwargs = {}
+    if config.model.name == "unet":
+        unet_kwargs = {
+            "unet_bilinear": getattr(config.model, "unet_bilinear", True),
+            "unet_encoder_name": getattr(config.model, "unet_encoder_name", None),
+            "unet_encoder_weights": getattr(
+                config.model, "unet_encoder_weights", "imagenet"
+            ),
+            "unet_encoder_depth": getattr(config.model, "unet_encoder_depth", 5),
+            "unet_decoder_channels": getattr(
+                config.model, "unet_decoder_channels", None
+            ),
+            "unet_decoder_use_batchnorm": getattr(
+                config.model, "unet_decoder_use_batchnorm", True
+            ),
+        }
+
     task = src.trainers.segmentation.SegmentationTrainer(
         segmentation_model=config.model.name,
         model=config.model.backbone,
@@ -71,6 +88,7 @@ def main(cfg):
         only_bias_trainable=config.model.only_bias_trainable,
         only_scaler_trainable=config.model.only_scaler_trainable,
         class_names=config.data.class_names,
+        **unet_kwargs,
     )
 
     accelerator = "gpu" if torch.cuda.is_available() else "cpu"
