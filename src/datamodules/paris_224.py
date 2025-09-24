@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 import albumentations as A
 import cv2
@@ -29,6 +29,8 @@ class ParisSegmentationDataModule(pl.LightningDataModule):
         val_split: float = 0.1,
         test_split: float = 0.1,
         seed: int = 0,
+        val_tile_indices: Optional[Sequence[int]] = None,
+        test_tile_indices: Optional[Sequence[int]] = None,
     ) -> None:
         super().__init__()
         self.root = root
@@ -39,6 +41,12 @@ class ParisSegmentationDataModule(pl.LightningDataModule):
         self.val_split = val_split
         self.test_split = test_split
         self.seed = seed
+        if val_tile_indices is None:
+            val_tile_indices = (15,)
+        if test_tile_indices is None:
+            test_tile_indices = (10,)
+        self.val_tile_indices = {int(idx) for idx in val_tile_indices}
+        self.test_tile_indices = {int(idx) for idx in test_tile_indices}
         self.train_augmentations = A.Compose(
             [
                 A.RandomResizedCrop(
@@ -104,16 +112,9 @@ class ParisSegmentationDataModule(pl.LightningDataModule):
             full_dataset = ParisBuildingSegmentation(
                 self.root, split=None, transforms=self.transforms
             )
-            lengths = self._split_lengths(len(full_dataset))
-            generator = torch.Generator().manual_seed(self.seed)
-            permutation = torch.randperm(len(full_dataset), generator=generator)
-
-            train_end = lengths[0]
-            val_end = train_end + lengths[1]
-
-            train_files = [full_dataset.files[i] for i in permutation[:train_end]]
-            val_files = [full_dataset.files[i] for i in permutation[train_end:val_end]]
-            test_files = [full_dataset.files[i] for i in permutation[val_end:]]
+            train_files, val_files, test_files = self._split_by_tile_index(
+                full_dataset.files
+            )
 
             self.train_dataset = ParisBuildingSegmentation(
                 self.root,
@@ -150,6 +151,59 @@ class ParisSegmentationDataModule(pl.LightningDataModule):
                 " validation and test splits."
             )
         return [train, val, dataset_size - train - val]
+
+    def _split_by_tile_index(self, files: Sequence[Path]) -> tuple[list[Path], list[Path], list[Path]]:
+        train_files: list[Path] = []
+        val_files: list[Path] = []
+        test_files: list[Path] = []
+
+        missing_val = set(self.val_tile_indices)
+        missing_test = set(self.test_tile_indices)
+
+        for path in files:
+            tile_index = self._extract_tile_index(path)
+            if tile_index in self.val_tile_indices:
+                val_files.append(path)
+                missing_val.discard(tile_index)
+            elif tile_index in self.test_tile_indices:
+                test_files.append(path)
+                missing_test.discard(tile_index)
+            else:
+                train_files.append(path)
+
+        if not train_files:
+            raise ValueError("No training tiles remain after splitting by tile indices.")
+        if not val_files:
+            raise ValueError("No validation tiles found for the requested tile indices.")
+        if not test_files:
+            raise ValueError("No test tiles found for the requested tile indices.")
+        if missing_val:
+            raise ValueError(
+                "The following validation tile indices were not found in the dataset: "
+                f"{sorted(missing_val)}"
+            )
+        if missing_test:
+            raise ValueError(
+                "The following test tile indices were not found in the dataset: "
+                f"{sorted(missing_test)}"
+            )
+
+        return train_files, val_files, test_files
+
+    @staticmethod
+    def _extract_tile_index(path: Path) -> int:
+        stem = path.stem
+        parts = stem.split("_")
+        if len(parts) < 3:
+            raise ValueError(
+                "Expected tile filename to contain an index component separated by underscores."
+            )
+        try:
+            return int(parts[2])
+        except ValueError as exc:
+            raise ValueError(
+                f"Unable to parse tile index from filename '{path.name}'."
+            ) from exc
 
     def train_dataloader(self) -> DataLoader[Dataset]:
         return DataLoader(
