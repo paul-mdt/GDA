@@ -18,7 +18,7 @@ data:
   few_shot_k: null
   few_shot_seed: null
 model:
-  name: fcn # upernet
+  name: fcn # upernet or unet
   backbone: sat_mae
   backbone_type: ""
   feature_map_indices: [5, 11, 17, 23]
@@ -44,6 +44,14 @@ model:
   loss_on_all_patches: True
   only_scaler_trainable: False
   only_bias_trainable: False
+  # U-Net specific options. Setting `unet_encoder_name` enables using
+  # segmentation-models-pytorch with pretrained backbones such as 'resnet34'.
+  unet_bilinear: True
+  unet_encoder_name: null
+  unet_encoder_weights: imagenet
+  unet_encoder_depth: 5
+  unet_decoder_channels: null
+  unet_decoder_use_batchnorm: True
 knn:
   knn_eval: False
   knn_k: 5
